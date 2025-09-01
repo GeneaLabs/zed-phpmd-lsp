@@ -1,0 +1,78 @@
+version: 2
+updates:
+  # Maintain dependencies for GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    assignees:
+      - "mikebronner"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    pull-request-branch-name:
+      separator: "-"
+
+  # Maintain dependencies for Rust
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    labels:
+      - "dependencies"
+      - "rust"
+    assignees:
+      - "mikebronner"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    pull-request-branch-name:
+      separator: "-"
+    groups:
+      patch-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+      minor-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+
+  # Maintain dependencies for LSP server
+  - package-ecosystem: "cargo"
+    directory: "/lsp-server"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    labels:
+      - "dependencies"
+      - "rust"
+      - "lsp-server"
+    assignees:
+      - "mikebronner"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    pull-request-branch-name:
+      separator: "-"
+    groups:
+      lsp-patch-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+      lsp-minor-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"

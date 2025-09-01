@@ -1,0 +1,237 @@
+name: Test Extension
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: "Type of test to run"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - build
+          - lint
+          - integration
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-test:
+    name: Build Test
+    if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'build'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasi
+
+      - name: Install cargo-component
+        run: |
+          cargo install cargo-component@0.13.2 --locked
+
+      - name: Build extension WASM
+        run: |
+          cargo component build --release
+          echo "✅ Extension WASM built successfully"
+
+      - name: Build LSP server
+        run: |
+          cd lsp-server
+          cargo build --release
+          echo "✅ LSP server built successfully"
+
+      - name: List build artifacts
+        shell: bash
+        run: |
+          echo "=== Extension WASM ==="
+          ls -la target/wasm32-wasi/release/*.wasm || true
+          echo ""
+          echo "=== LSP Server Binary ==="
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            ls -la lsp-server/target/release/*.exe || true
+          else
+            ls -la lsp-server/target/release/phpmd-lsp-server || true
+          fi
+
+  lint-test:
+    name: Lint Test
+    if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'lint'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check code formatting
+        run: |
+          cargo fmt --all -- --check
+          echo "✅ Code formatting check passed"
+
+      - name: Run clippy lints
+        run: |
+          cargo clippy --all-targets --all-features -- -D warnings
+          echo "✅ Clippy lints passed"
+
+      - name: Check LSP server lints
+        run: |
+          cd lsp-server
+          cargo clippy --all-targets --all-features -- -D warnings
+          echo "✅ LSP server lints passed"
+
+  integration-test:
+    name: Integration Test
+    if: github.event.inputs.test_type == 'all' || github.event.inputs.test_type == 'integration'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+          coverage: none
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build LSP server
+        run: |
+          cd lsp-server
+          cargo build --release
+          echo "✅ LSP server built"
+
+      - name: Download PHPMD
+        run: |
+          PHPMD_VERSION="2.15.0"
+          curl -L "https://github.com/phpmd/phpmd/releases/download/${PHPMD_VERSION}/phpmd.phar" -o phpmd.phar
+          chmod +x phpmd.phar
+          php phpmd.phar --version
+          echo "✅ PHPMD downloaded and verified"
+
+      - name: Test PHPMD with sample files
+        run: |
+          echo "=== Testing PHPMD with various rulesets ==="
+          
+          # Create a test file with known issues
+          cat > test.php << 'EOF'
+          <?php
+          class TestClass {
+              private $unused_property;
+              
+              public function complexMethod($a, $b, $c, $d, $e, $f, $g) {
+                  if ($a) {
+                      if ($b) {
+                          if ($c) {
+                              if ($d) {
+                                  if ($e) {
+                                      if ($f) {
+                                          return $g;
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+              
+              private function unusedMethod() {
+                  return true;
+              }
+              
+              public function shortVariableName() {
+                  $x = 1;
+                  return $x;
+              }
+          }
+          EOF
+          
+          echo "--- Testing cleancode ruleset ---"
+          php phpmd.phar test.php text cleancode || true
+          
+          echo ""
+          echo "--- Testing codesize ruleset ---"
+          php phpmd.phar test.php text codesize || true
+          
+          echo ""
+          echo "--- Testing controversial ruleset ---"
+          php phpmd.phar test.php text controversial || true
+          
+          echo ""
+          echo "--- Testing design ruleset ---"
+          php phpmd.phar test.php text design || true
+          
+          echo ""
+          echo "--- Testing naming ruleset ---"
+          php phpmd.phar test.php text naming || true
+          
+          echo ""
+          echo "--- Testing unusedcode ruleset ---"
+          php phpmd.phar test.php text unusedcode || true
+          
+          echo ""
+          echo "--- Testing all rulesets combined ---"
+          php phpmd.phar test.php text cleancode,codesize,controversial,design,naming,unusedcode || true
+          
+          echo ""
+          echo "✅ PHPMD integration tests completed"
+
+      - name: Test LSP server startup
+        run: |
+          # Start the LSP server in the background
+          timeout 5s ./lsp-server/target/release/phpmd-lsp-server 2>&1 | head -20 || true
+          echo "✅ LSP server startup test completed"
+
+  summary:
+    name: Test Summary
+    needs: [build-test, lint-test, integration-test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          echo "## 📊 Test Summary"
+          echo ""
+          echo "### Build Tests"
+          if [ "${{ needs.build-test.result }}" == "success" ]; then
+            echo "✅ All build tests passed"
+          elif [ "${{ needs.build-test.result }}" == "skipped" ]; then
+            echo "⏭️ Build tests were skipped"
+          else
+            echo "❌ Build tests failed"
+          fi
+          
+          echo ""
+          echo "### Lint Tests"
+          if [ "${{ needs.lint-test.result }}" == "success" ]; then
+            echo "✅ All lint tests passed"
+          elif [ "${{ needs.lint-test.result }}" == "skipped" ]; then
+            echo "⏭️ Lint tests were skipped"
+          else
+            echo "❌ Lint tests failed"
+          fi
+          
+          echo ""
+          echo "### Integration Tests"
+          if [ "${{ needs.integration-test.result }}" == "success" ]; then
+            echo "✅ All integration tests passed"
+          elif [ "${{ needs.integration-test.result }}" == "skipped" ]; then
+            echo "⏭️ Integration tests were skipped"
+          else
+            echo "❌ Integration tests failed"
+          fi
+          
+          echo ""
+          echo "---"
+          echo "Test type: ${{ github.event.inputs.test_type }}"
+          echo "Triggered by: ${{ github.actor }}"

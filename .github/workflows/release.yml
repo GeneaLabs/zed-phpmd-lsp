@@ -1,0 +1,268 @@
+name: Release
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build assets for"
+        required: true
+
+env:
+  GITHUB_TOKEN: ${{ secrets.OWNER_PAT || secrets.GITHUB_TOKEN }}
+
+jobs:
+  update-version:
+    runs-on: ubuntu-latest
+    outputs:
+        new_version: ${{ steps.extract_version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ env.GITHUB_TOKEN }}
+          fetch-depth: 0
+          ref: main
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Extract version from release tag
+        id: extract_version
+        run: |
+          # Remove 'v' prefix if present (e.g., v1.2.3 -> 1.2.3)
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Extracted version: ${VERSION}"
+
+      - name: Update versions and lock files
+        run: |
+          # Update TOML versions
+          sed -i 's/^version = "[^"]*"/version = "${{ steps.extract_version.outputs.version }}"/' Cargo.toml
+          echo "Updated root Cargo.toml version to ${{ steps.extract_version.outputs.version }}"
+
+          sed -i 's/^version = "[^"]*"/version = "${{ steps.extract_version.outputs.version }}"/' extension.toml
+          echo "Updated extension.toml version to ${{ steps.extract_version.outputs.version }}"
+
+          sed -i 's/^version = "[^"]*"/version = "${{ steps.extract_version.outputs.version }}"/' lsp-server/Cargo.toml
+          echo "Updated lsp-server/Cargo.toml version to ${{ steps.extract_version.outputs.version }}"
+
+          # Update Cargo.lock files
+          cargo update --manifest-path Cargo.toml
+          echo "Updated root Cargo.lock"
+
+          cargo update --manifest-path lsp-server/Cargo.toml
+          echo "Updated lsp-server/Cargo.lock"
+
+      - name: Verify changes
+        run: |
+          echo "=== Root Cargo.toml ==="
+          grep "^version =" Cargo.toml
+          echo "=== extension.toml ==="
+          grep "^version =" extension.toml
+          echo "=== lsp-server/Cargo.toml ==="
+          grep "^version =" lsp-server/Cargo.toml
+
+      - name: Commit and push changes
+        id: commit_changes
+        run: |
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          # Check if there are any changes to commit
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No changes to commit"
+            echo "new_commit_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          else
+            git add -A
+            git commit -m "chore: 🔖 Update version to ${{ steps.extract_version.outputs.version }}."
+            git push origin main
+            NEW_COMMIT_SHA=$(git rev-parse HEAD)
+            echo "new_commit_sha=${NEW_COMMIT_SHA}" >> $GITHUB_OUTPUT
+            echo "All changed files updated and pushed to main branch"
+            echo "New commit SHA: ${NEW_COMMIT_SHA}"
+          fi
+
+      - name: Update tag and release
+        if: steps.commit_changes.outputs.new_commit_sha != ''
+        run: |
+          TAG_NAME="${{ github.event.release.tag_name }}"
+          RELEASE_ID="${{ github.event.release.id }}"
+          FINAL_COMMIT_SHA="${{ steps.commit_changes.outputs.new_commit_sha }}"
+
+          echo "Updating tag ${TAG_NAME} to point to commit ${FINAL_COMMIT_SHA}"
+
+          # Update the tag to point to the new commit
+          curl -L \
+            -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/${TAG_NAME}" \
+            -d "{\"sha\":\"${FINAL_COMMIT_SHA}\",\"force\":true}"
+
+          echo "Updated tag ${TAG_NAME} to commit ${FINAL_COMMIT_SHA}"
+
+          # Update the release to point to the new commit
+          curl -L \
+            -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}" \
+            -d "{\"tag_name\":\"${TAG_NAME}\",\"target_commitish\":\"${FINAL_COMMIT_SHA}\"}"
+
+          echo "Updated release ${RELEASE_ID} to point to commit ${FINAL_COMMIT_SHA}"
+          echo "Version update complete!"
+
+  build-lsp-server:
+    name: Build LSP Server
+    needs: update-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: phpmd-lsp-server-linux-x64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            binary_name: phpmd-lsp-server-linux-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary_name: phpmd-lsp-server-macos-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: phpmd-lsp-server-macos-arm64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: phpmd-lsp-server-windows-x64.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            binary_name: phpmd-lsp-server-windows-arm64.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Configure cross-compilation
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml << EOF
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Build LSP Server
+        run: |
+          cd lsp-server
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary
+        shell: bash
+        run: |
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            cp lsp-server/target/${{ matrix.target }}/release/phpmd-lsp-server.exe ${{ matrix.binary_name }}
+          else
+            cp lsp-server/target/${{ matrix.target }}/release/phpmd-lsp-server ${{ matrix.binary_name }}
+          fi
+
+      - name: Create archive
+        shell: bash
+        run: |
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            7z a ${{ matrix.binary_name }}.zip ${{ matrix.binary_name }}
+            echo "ASSET_PATH=${{ matrix.binary_name }}.zip" >> $GITHUB_ENV
+          else
+            tar -czf ${{ matrix.binary_name }}.tar.gz ${{ matrix.binary_name }}
+            echo "ASSET_PATH=${{ matrix.binary_name }}.tar.gz" >> $GITHUB_ENV
+          fi
+
+      - name: Upload Release Asset
+        if: github.event_name == 'release'
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ${{ env.ASSET_PATH }}
+          asset_name: ${{ env.ASSET_PATH }}
+          asset_content_type: application/octet-stream
+
+      - name: Upload to specific release
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          files: ${{ env.ASSET_PATH }}
+          token: ${{ env.GITHUB_TOKEN }}
+
+  download-phar:
+    name: Download and Package PHPMD PHAR
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download PHPMD PHAR
+        run: |
+          # Download latest stable PHPMD from official releases
+          PHPMD_VERSION="2.15.0"
+          curl -L "https://github.com/phpmd/phpmd/releases/download/${PHPMD_VERSION}/phpmd.phar" -o phpmd.phar
+
+          # Make it executable
+          chmod +x phpmd.phar
+
+          # Verify it works
+          php phpmd.phar --version
+
+      - name: Create PHAR archive
+        run: |
+          tar -czf phpmd.phar.tar.gz phpmd.phar
+
+      - name: Upload PHPMD PHAR
+        if: github.event_name == 'release'
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: phpmd.phar.tar.gz
+          asset_name: phpmd.phar.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload PHAR to specific release
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          files: phpmd.phar.tar.gz
+          token: ${{ env.GITHUB_TOKEN }}
+
+  publish:
+    name: Publish Zed Extension
+    runs-on: ubuntu-latest
+    needs:
+      - download-phar
+      - build-lsp-server
+      - update-version
+    steps:
+      - uses: huacnlee/zed-extension-action@v1
+        with:
+          extension-name: phpmd
+          push-to: GeneaLabs/extensions
+          tag-name: ${{ needs.update-version.outputs.new_version }}
+        env:
+          COMMITTER_TOKEN: ${{ secrets.ZED_PUBLISHING_TOKEN }}

@@ -1,0 +1,298 @@
+name: Pull Request
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      workflows: ${{ steps.filter.outputs.workflows }}
+      docs: ${{ steps.filter.outputs.docs }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          filters: |
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - '**/Cargo.lock'
+            workflows:
+              - '.github/workflows/**'
+            docs:
+              - '**/*.md'
+              - 'docs/**'
+
+  validate-pr:
+    name: Validate PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check PR title
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+
+      - name: Check branch name
+        run: |
+          BRANCH_NAME="${{ github.head_ref }}"
+          echo "Branch name: $BRANCH_NAME"
+          
+          # Check if branch name follows conventional pattern
+          if [[ ! "$BRANCH_NAME" =~ ^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)/.+ ]]; then
+            echo "⚠️ Branch name doesn't follow conventional pattern (type/description)"
+            echo "Consider using: feat/*, fix/*, docs/*, etc."
+          fi
+
+  lint:
+    name: Lint Code
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            lsp-server -> lsp-server/target
+
+      - name: Check formatting
+        run: |
+          cargo fmt --all -- --check
+          cd lsp-server && cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: |
+          cargo clippy --all-targets --all-features -- -D warnings
+          cd lsp-server && cargo clippy --all-targets --all-features -- -D warnings
+
+  build:
+    name: Build & Test
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasi
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            lsp-server -> lsp-server/target
+
+      - name: Install cargo-component
+        run: cargo install cargo-component@0.13.2 --locked
+
+      - name: Build extension
+        run: cargo component build --release
+
+      - name: Build LSP server
+        run: |
+          cd lsp-server
+          cargo build --release
+
+      - name: Run tests
+        run: |
+          cargo test --all
+          cd lsp-server && cargo test --all
+
+      - name: Upload artifacts
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-artifacts
+          path: |
+            target/wasm32-wasi/release/*.wasm
+            lsp-server/target/release/phpmd-lsp-server
+
+  phpmd-validation:
+    name: Validate PHPMD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+          coverage: none
+
+      - name: Test PHPMD functionality
+        run: |
+          # Download PHPMD
+          PHPMD_VERSION="2.15.0"
+          curl -L "https://github.com/phpmd/phpmd/releases/download/${PHPMD_VERSION}/phpmd.phar" -o phpmd.phar
+          chmod +x phpmd.phar
+          
+          # Create test file
+          cat > test.php << 'EOF'
+          <?php
+          class ExampleClass {
+              private $unusedVar;
+              public function tooManyParams($a, $b, $c, $d, $e, $f) {
+                  if ($a && $b && $c && $d && $e) {
+                      return $f;
+                  }
+              }
+          }
+          EOF
+          
+          # Test with different rulesets
+          echo "Testing PHPMD with all rulesets..."
+          php phpmd.phar test.php text cleancode,codesize,controversial,design,naming,unusedcode || true
+          
+          echo "✅ PHPMD validation completed"
+
+  security:
+    name: Security Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Security audit
+        run: |
+          cargo audit
+          cd lsp-server && cargo audit
+
+      - name: Check for secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+
+  pr-summary:
+    name: PR Summary
+    needs: [validate-pr, lint, build, phpmd-validation, security]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Add PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const jobs = {
+              'validate-pr': '${{ needs.validate-pr.result }}',
+              'lint': '${{ needs.lint.result }}',
+              'build': '${{ needs.build.result }}',
+              'phpmd-validation': '${{ needs.phpmd-validation.result }}',
+              'security': '${{ needs.security.result }}'
+            };
+            
+            const icons = {
+              'success': '✅',
+              'failure': '❌',
+              'cancelled': '⏹️',
+              'skipped': '⏭️'
+            };
+            
+            let allPassed = true;
+            let summary = '## 🤖 Automated PR Check Results\n\n';
+            summary += '| Check | Status |\n';
+            summary += '|-------|--------|\n';
+            
+            for (const [job, result] of Object.entries(jobs)) {
+              const icon = icons[result] || '❓';
+              const name = job.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+              summary += `| ${name} | ${icon} ${result} |\n`;
+              if (result !== 'success' && result !== 'skipped') {
+                allPassed = false;
+              }
+            }
+            
+            summary += '\n';
+            
+            if (allPassed) {
+              summary += '### ✅ All checks passed!\n\n';
+              summary += 'This PR is ready for review.\n';
+            } else {
+              summary += '### ⚠️ Some checks need attention\n\n';
+              summary += 'Please review the failed checks above.\n';
+            }
+            
+            summary += '\n---\n';
+            summary += `*Generated at ${new Date().toISOString()}*`;
+            
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('Automated PR Check Results')
+            );
+            
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: summary
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: summary
+              });
+            }
