@@ -1,0 +1,62 @@
+# Rust build artifacts
+target/
+Cargo.lock
+
+# Extension build artifacts
+extension.wasm
+*.tar.gz
+
+# LSP server binaries
+phpmd-lsp-server
+phpmd-lsp-server-*
+!phpmd-lsp-server-*.tar.gz
+
+# PHPMD PHAR files
+phpmd.phar
+phpcbf.phar
+
+# IDE and system files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.env
+.env.local
+
+# Test artifacts
+test-output/
+coverage/
+*.log
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+
+# Debug files
+*.pdb
+*.dSYM/
+
+# Node modules (if any frontend tools are used)
+node_modules/
+
+# Python virtual environments (if any scripts use Python)
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Documentation build artifacts
+docs/_build/
+docs/.doctrees/
+
+# Local development files
+.phpcs-cache
+.phpmd-cache
+.php-cs-fixer.cache
+
+# Zed-specific
+.zed/

@@ -1,0 +1,14 @@
+[package]
+name = "zed-phpmd-lsp"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mike Bronner <mike@genealabs.com>"]
+description = "PHP Mess Detector Language Server extension for Zed"
+repository = "https://github.com/GeneaLabs/zed-phpmd-lsp"
+license = "MIT"
+
+[dependencies]
+zed_extension_api = "0.0.6"
+
+[lib]
+crate-type = ["cdylib"]
