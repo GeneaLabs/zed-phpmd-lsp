@@ -1,0 +1,35 @@
+
+# Rust build artifacts
+target/
+extension.wasm
+
+# LSP server build artifacts
+lsp-server/target/
+
+# Built binaries (removed - these are deliverables users need)
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Python cache (if any Python scripts)
+__pycache__/
+*.pyc
+
+# Development/debug files
+.ropeproject/
+.claude*/
+.swarm/
+lsp-server/.claude*/
+lsp-server/.swarm/
