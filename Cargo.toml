@@ -8,7 +8,7 @@ repository = "https://github.com/GeneaLabs/zed-phpmd-lsp"
 license = "MIT"
 
 [dependencies]
-zed_extension_api = "0.0.6"
+zed_extension_api = "0.6.0"
 
 [lib]
 crate-type = ["cdylib"]
