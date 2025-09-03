@@ -225,34 +225,51 @@ impl PhpmdLanguageServer {
     }
 
     fn discover_rulesets(&self, workspace_root: Option<&std::path::Path>) {
-        eprintln!("🔍 PHPMD LSP: Discovering rulesets...");
+        eprintln!("🔍 PHPMD LSP: Discovering PHPMD configuration files...");
 
         if let Some(root) = workspace_root {
             let config_files = [
                 "phpmd.xml",
                 "phpmd.xml.dist",
                 ".phpmd.xml",
+                ".phpmd.xml.dist",
             ];
 
             for config_file in &config_files {
                 let config_path = root.join(config_file);
 
                 if config_path.exists() {
-                    if let Some(path_str) = config_path.to_str() {
-                        eprintln!("✅ PHPMD LSP: Found config file: {}", path_str);
-                        if let Ok(mut rulesets_guard) = self.rulesets.write() {
-                            *rulesets_guard = Some(path_str.to_string());
+                    eprintln!("📄 PHPMD LSP: Checking potential config file: {}", config_file);
+                    
+                    // Validate it's a valid XML file
+                    if let Ok(contents) = fs::read_to_string(&config_path) {
+                        // Basic XML validation - check if it contains ruleset definition
+                        if contents.contains("<ruleset") && contents.contains("</ruleset>") {
+                            if let Some(path_str) = config_path.to_str() {
+                                eprintln!("✅ PHPMD LSP: Using valid PHPMD config file: {}", path_str);
+                                eprintln!("📋 PHPMD LSP: Config file contains {} bytes", contents.len());
+                                if let Ok(mut rulesets_guard) = self.rulesets.write() {
+                                    // Store the full path to the config file
+                                    *rulesets_guard = Some(path_str.to_string());
+                                }
+                                return;
+                            }
+                        } else {
+                            eprintln!("⚠️ PHPMD LSP: File {} exists but doesn't appear to be a valid PHPMD ruleset XML", config_file);
                         }
-                        return;
+                    } else {
+                        eprintln!("⚠️ PHPMD LSP: Could not read config file: {}", config_file);
                     }
                 }
             }
+            
+            eprintln!("🔍 PHPMD LSP: No valid PHPMD config files found in project root");
         }
 
-        // No config file found - use default rulesets
-        eprintln!("🎯 PHPMD LSP: No config files found - will use default rulesets");
+        // No config file found - use ALL available PHPMD rulesets for comprehensive analysis
+        eprintln!("🎯 PHPMD LSP: Using all PHPMD rulesets as fallback (cleancode, codesize, controversial, design, naming, unusedcode)");
         if let Ok(mut rulesets_guard) = self.rulesets.write() {
-            // Default to common rulesets
+            // Use all available PHPMD rulesets for maximum coverage
             *rulesets_guard = Some("cleancode,codesize,controversial,design,naming,unusedcode".to_string());
         }
     }
@@ -339,6 +356,24 @@ impl PhpmdLanguageServer {
         // Find the project root for this specific file
         let project_root = self.find_project_root(uri);
         eprintln!("📁 PHPMD LSP: Using project root: {}", project_root.display());
+        
+        // Check if we need to discover config files (if none set or using fallback)
+        let should_discover = if let Ok(rulesets_guard) = self.rulesets.read() {
+            match &*rulesets_guard {
+                None => true,
+                Some(rulesets) => {
+                    // Re-discover if we're using the fallback rulesets
+                    rulesets == "cleancode,codesize,controversial,design,naming,unusedcode"
+                }
+            }
+        } else {
+            false
+        };
+        
+        if should_discover {
+            eprintln!("🔍 PHPMD LSP: Checking for config files in project root...");
+            self.discover_rulesets(Some(&project_root));
+        }
 
         // Check if PHPMD is a PHAR file that needs PHP invocation for proper error suppression
         let mut cmd = if phpmd_path.ends_with(".phar") {
@@ -383,11 +418,19 @@ impl PhpmdLanguageServer {
            .stderr(std::process::Stdio::piped())
            .kill_on_drop(true);  // Ensure process is killed if dropped
         
-        // Add rulesets after the file path and format
+        // Add rulesets or config file path after the file path and format
         if let Ok(rulesets_guard) = self.rulesets.read() {
             if let Some(ref rulesets) = *rulesets_guard {
-                cmd.arg(rulesets);
+                // Check if this is a path to a config file or ruleset names
+                if rulesets.ends_with(".xml") || rulesets.ends_with(".xml.dist") {
+                    eprintln!("📋 PHPMD LSP: Using config file: {}", rulesets);
+                    cmd.arg(rulesets);
+                } else {
+                    eprintln!("📋 PHPMD LSP: Using rulesets: {}", rulesets);
+                    cmd.arg(rulesets);
+                }
             } else {
+                eprintln!("📋 PHPMD LSP: Using all default rulesets");
                 cmd.arg("cleancode,codesize,controversial,design,naming,unusedcode");
             }
         }
@@ -948,6 +991,8 @@ impl LanguageServer for PhpmdLanguageServer {
             *workspace_guard = workspace_root.clone();
         }
 
+        let mut should_discover = true;
+        
         if let Some(options) = params.initialization_options {
             // Parse initialization options
             eprintln!("📦 PHPMD LSP: Processing initialization options from extension");
@@ -958,8 +1003,9 @@ impl LanguageServer for PhpmdLanguageServer {
                         if let Ok(mut rulesets_guard) = self.rulesets.write() {
                             *rulesets_guard = Some(rulesets.clone());
                         }
+                        should_discover = false;  // Don't discover if rulesets were explicitly provided
                     } else {
-                        eprintln!("🎯 PHPMD LSP: No rulesets provided by extension - will use defaults");
+                        eprintln!("🎯 PHPMD LSP: No rulesets provided by extension - will discover from workspace");
                     }
                 },
                 Err(e) => {
@@ -967,15 +1013,34 @@ impl LanguageServer for PhpmdLanguageServer {
                 }
             }
         } else {
-            // No initialization options provided, discover from workspace
+            eprintln!("📋 PHPMD LSP: No initialization options provided - will discover from workspace");
+        }
+        
+        // Discover from workspace if no explicit rulesets were provided
+        if should_discover {
             self.discover_rulesets(workspace_root.as_deref());
         }
 
         // Log final initialization state
         if let Ok(rulesets_guard) = self.rulesets.read() {
             match &*rulesets_guard {
-                Some(rulesets) => eprintln!("🎯 PHPMD LSP: Initialized with rulesets: '{}'", rulesets),
-                None => eprintln!("🎯 PHPMD LSP: Initialized with default rulesets"),
+                Some(rulesets) => {
+                    if rulesets.ends_with(".xml") || rulesets.ends_with(".xml.dist") {
+                        eprintln!("🎯 PHPMD LSP: Initialized with config file: '{}'", rulesets);
+                        eprintln!("📋 PHPMD LSP: Configuration source: Project-specific XML ruleset");
+                    } else {
+                        eprintln!("🎯 PHPMD LSP: Initialized with rulesets: '{}'", rulesets);
+                        if rulesets == "cleancode,codesize,controversial,design,naming,unusedcode" {
+                            eprintln!("📋 PHPMD LSP: Configuration source: Fallback (all available rulesets)");
+                        } else {
+                            eprintln!("📋 PHPMD LSP: Configuration source: Custom ruleset configuration");
+                        }
+                    }
+                },
+                None => {
+                    eprintln!("🎯 PHPMD LSP: Initialized with default rulesets");
+                    eprintln!("📋 PHPMD LSP: Configuration source: Built-in defaults");
+                }
             }
         }
 
@@ -1093,6 +1158,7 @@ impl LanguageServer for PhpmdLanguageServer {
                 if let Ok(parsed_settings) = serde_json::from_value::<PhpmdSettings>(phpmd_settings.clone()) {
                     // Update the rulesets if provided
                     if let Some(new_rulesets) = parsed_settings.rulesets {
+                        eprintln!("⚙️ PHPMD LSP: Configuration changed via settings: '{}'", new_rulesets);
                         if let Ok(mut rulesets_guard) = self.rulesets.write() {
                             *rulesets_guard = Some(new_rulesets);
                         }
@@ -1103,6 +1169,7 @@ impl LanguageServer for PhpmdLanguageServer {
             // Also check for rulesets directly in settings (for compatibility)
             if let Some(rulesets_value) = settings.get("rulesets") {
                 if let Some(new_rulesets) = rulesets_value.as_str() {
+                    eprintln!("⚙️ PHPMD LSP: Configuration changed via direct rulesets setting: '{}'", new_rulesets);
                     if let Ok(mut rulesets_guard) = self.rulesets.write() {
                         *rulesets_guard = Some(new_rulesets.to_string());
                     }

@@ -54,7 +54,9 @@ The PHPMD Language Server brings comprehensive code quality analysis to Zed Edit
 ### Configuration Features
 
 #### 🔧 **Flexible Configuration**
-- **Auto-Discovery** - Finds `phpmd.xml`, `phpmd.xml.dist`, or `.phpmd.xml` automatically
+- **Auto-Discovery** - Finds `phpmd.xml`, `phpmd.xml.dist`, `.phpmd.xml`, or `.phpmd.xml.dist` automatically
+- **XML Validation** - Validates config files before use, skipping invalid XML files
+- **Smart Fallback** - Uses all PHPMD rulesets when no valid config file is found
 - **Live Reloading** - Configuration changes apply instantly without restart
 - **Multi-Source** - Configure via project files, Zed settings, or environment variables
 - **Auto-Recovery** - Gracefully handles deleted or invalid config files
